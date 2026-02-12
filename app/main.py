@@ -106,7 +106,6 @@ async def webhook(
 
     ctx = BotContext(
         nuxbill=app.state.nuxbill,
-        recharge_using=settings.nuxbill_recharge_using,
         activate_using=settings.nuxbill_activate_using,
     )
 

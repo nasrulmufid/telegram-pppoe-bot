@@ -13,7 +13,6 @@ from app.security.validation import validate_page, validate_plan_query, validate
 @dataclass(frozen=True)
 class BotContext:
     nuxbill: NuxBillService
-    recharge_using: str
     activate_using: str
 
 
@@ -88,6 +87,24 @@ def _parse_int(value: str, *, field: str) -> int:
     return n
 
 
+def _normalize_using(value: str) -> str:
+    v = (value or "").strip().lower()
+    if v in ("cash", "transfer", "dana", "zero"):
+        return v
+    raise ValueError("Metode pembayaran tidak valid")
+
+
+def _using_label(using: str) -> str:
+    u = _normalize_using(using)
+    if u == "cash":
+        return "Cash"
+    if u == "transfer":
+        return "Transfer"
+    if u == "dana":
+        return "DANA"
+    return "Rp.0"
+
+
 def _build_customers_markup(*, status: str, page: int, customers: list[dict[str, Any]]) -> dict[str, Any]:
     buttons: list[dict[str, str]] = []
     for c in customers:
@@ -131,7 +148,7 @@ def _build_plans_markup(*, customer_id: int, page: int, plans: list[Plan]) -> di
         buttons.append(
             {
                 "text": label[:64],
-                "callback_data": f"rch_exec:{customer_id}:{p.id}:{_b64e(server)}",
+                "callback_data": f"rch_pay:{customer_id}:{p.id}:{_b64e(server)}:{page}",
             }
         )
 
@@ -145,6 +162,23 @@ def _build_plans_markup(*, customer_id: int, page: int, plans: list[Plan]) -> di
     if nav:
         rows.append(nav)
 
+    rows.append([{"text": "⬅️ Kembali ke customer", "callback_data": "rch_c:Active:1"}])
+    return _inline_keyboard(rows)
+
+
+def _build_payment_markup(*, customer_id: int, plan_id: int, server: str, page: int) -> dict[str, Any]:
+    s = _b64e(server)
+    options = [
+        ("cash", "Cash"),
+        ("transfer", "Transfer"),
+        ("dana", "DANA"),
+        ("zero", "Rp.0"),
+    ]
+    rows = [
+        [{"text": label, "callback_data": f"rch_do:{customer_id}:{plan_id}:{s}:{using}:{page}"}]
+        for using, label in options
+    ]
+    rows.append([{"text": "⬅️ Kembali ke paket", "callback_data": f"rch_pl:{customer_id}:{page}"}])
     rows.append([{"text": "⬅️ Kembali ke customer", "callback_data": "rch_c:Active:1"}])
     return _inline_keyboard(rows)
 
@@ -210,7 +244,7 @@ async def handle_command(ctx: BotContext, name: str, args: list[str]) -> BotRepl
             view = await ctx.nuxbill.get_customer_view_by_username(username)
             cust = ctx.nuxbill.parse_customer(view)
             plan = await ctx.nuxbill.find_pppoe_plan_best_match(paket)
-            await ctx.nuxbill.recharge(customer_id=cust.id, plan=plan, using=ctx.recharge_using)
+            await ctx.nuxbill.recharge(customer_id=cust.id, plan=plan, using="cash")
             return BotReply(f"Recharge berhasil untuk {cust.username} dengan paket {plan.name_plan}.")
 
         if name == "deactivate":
@@ -309,25 +343,49 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
             text = f"Pilih paket (page {page}):"
             return CallbackResult(text, reply_markup=_build_plans_markup(customer_id=customer_id, page=page, plans=plans))
 
-        if data.startswith("rch_exec:"):
-            parts = data.split(":", 3)
-            if len(parts) != 4:
+        if data.startswith("rch_pay:"):
+            parts = data.split(":", 4)
+            if len(parts) != 5:
                 raise ValueError("Format callback tidak valid")
             customer_id = _parse_int(parts[1], field="Customer ID")
             plan_id = _parse_int(parts[2], field="Plan ID")
             server = _b64d(parts[3])
+            view = await ctx.nuxbill.get_customer_view_by_id(customer_id)
+            cust = ctx.nuxbill.parse_customer(view)
+            page = _parse_int(parts[4], field="Page")
+            text = f"Customer: {cust.username}\nPaket: plan_id={plan_id}\nPilih pembayaran:"
+            return CallbackResult(
+                text,
+                reply_markup=_build_payment_markup(customer_id=customer_id, plan_id=plan_id, server=server, page=page),
+                answer="Pilih pembayaran",
+            )
+
+        if data.startswith("rch_do:"):
+            parts = data.split(":", 5)
+            if len(parts) != 6:
+                raise ValueError("Format callback tidak valid")
+            customer_id = _parse_int(parts[1], field="Customer ID")
+            plan_id = _parse_int(parts[2], field="Plan ID")
+            server = _b64d(parts[3])
+            using = _normalize_using(parts[4])
+            page = _parse_int(parts[5], field="Page")
             await ctx.nuxbill.recharge_by_plan_id(
                 customer_id=customer_id,
                 plan_id=plan_id,
                 server=server,
-                using=ctx.recharge_using,
+                using=using,
             )
             view = await ctx.nuxbill.get_customer_view_by_id(customer_id)
             cust = ctx.nuxbill.parse_customer(view)
-            text = f"Recharge berhasil untuk {cust.username} (plan_id={plan_id})."
+            text = f"Recharge berhasil untuk {cust.username} (plan_id={plan_id}) via {_using_label(using)}."
             return CallbackResult(
                 text,
-                reply_markup=_inline_keyboard([[{"text": "Recharge lagi", "callback_data": "rch_c:Active:1"}]]),
+                reply_markup=_inline_keyboard(
+                    [
+                        [{"text": "Recharge lagi", "callback_data": "rch_c:Active:1"}],
+                        [{"text": "Pilih paket lagi", "callback_data": f"rch_pl:{customer_id}:{page}"}],
+                    ]
+                ),
                 answer="Recharge berhasil",
             )
 

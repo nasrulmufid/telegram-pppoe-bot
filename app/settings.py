@@ -13,7 +13,6 @@ class Settings(BaseSettings):
     nuxbill_username: str
     nuxbill_password: str
 
-    nuxbill_recharge_using: str = "cash"
     nuxbill_activate_using: str = "zero"
 
     bot_rate_limit_max: int = 5
