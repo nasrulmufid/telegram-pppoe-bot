@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+
+.env
+audit.db
+
+.venv/
+venv/
+.python-version
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

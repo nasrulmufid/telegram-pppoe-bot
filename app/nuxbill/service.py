@@ -53,6 +53,7 @@ class NuxBillService:
         self._cache_customers_list: TTLCache = TTLCache(maxsize=200, ttl=15)
         self._cache_customer_view: TTLCache = TTLCache(maxsize=500, ttl=30)
         self._cache_pppoe_plans_search: TTLCache = TTLCache(maxsize=200, ttl=300)
+        self._cache_pppoe_plans_list: TTLCache = TTLCache(maxsize=200, ttl=60)
 
     async def list_customers(self, *, status_filter: str, search: str = "", page: int = 1) -> list[dict[str, Any]]:
         cache_key = f"customers:{status_filter}:{search}:{page}"
@@ -179,6 +180,38 @@ class NuxBillService:
                     continue
 
         self._cache_pppoe_plans_search[cache_key] = plans
+        return plans
+
+    async def list_pppoe_plans(self, *, page: int = 1, name: str = "") -> list[Plan]:
+        cache_key = f"pppoe_plans_list:{page}:{name.lower()}"
+        cached = self._cache_pppoe_plans_list.get(cache_key)
+        if cached is not None:
+            return cached
+
+        payload = await self._client.get(r="services/pppoe", params={"name": name, "p": page})
+        self._client.require_success(payload)
+        result = payload.get("result") or {}
+        plans_raw = result.get("d") or []
+        plans: list[Plan] = []
+        if isinstance(plans_raw, list):
+            for item in plans_raw:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("type") or "").upper() != "PPPOE":
+                    continue
+                try:
+                    plans.append(
+                        Plan(
+                            id=int(item.get("id") or 0),
+                            name_plan=str(item.get("name_plan") or ""),
+                            routers=(item.get("routers") or None),
+                            is_radius=(int(item["is_radius"]) if item.get("is_radius") is not None else None),
+                            type=(item.get("type") or None),
+                        )
+                    )
+                except Exception:
+                    continue
+        self._cache_pppoe_plans_list[cache_key] = plans
         return plans
 
     async def find_pppoe_plan_best_match(self, query: str) -> Plan:

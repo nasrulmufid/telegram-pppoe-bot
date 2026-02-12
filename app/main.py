@@ -8,7 +8,7 @@ from typing import Optional
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 
-from app.commands.handlers import BotContext, handle_command
+from app.commands.handlers import BotContext, BotReply, CallbackResult, handle_callback, handle_command
 from app.commands.parser import parse_command
 from app.nuxbill.client import NuxBillClient
 from app.nuxbill.service import NuxBillService
@@ -68,9 +68,27 @@ async def _shutdown() -> None:
 
 
 @retry_telegram()
-async def _send_telegram(chat_id: int, reply_to: Optional[int], text: str) -> None:
+async def _send_telegram(
+    chat_id: int,
+    reply_to: Optional[int],
+    text: str,
+    *,
+    reply_markup: Optional[dict] = None,
+) -> None:
     telegram: TelegramClient = app.state.telegram
-    await telegram.send_message(chat_id=chat_id, text=text, reply_to_message_id=reply_to)
+    await telegram.send_message(chat_id=chat_id, text=text, reply_to_message_id=reply_to, reply_markup=reply_markup)
+
+
+@retry_telegram()
+async def _edit_telegram(chat_id: int, message_id: int, text: str, *, reply_markup: Optional[dict] = None) -> None:
+    telegram: TelegramClient = app.state.telegram
+    await telegram.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup)
+
+
+@retry_telegram()
+async def _answer_callback(callback_query_id: str, text: Optional[str]) -> None:
+    telegram: TelegramClient = app.state.telegram
+    await telegram.answer_callback_query(callback_query_id=callback_query_id, text=text)
 
 
 @app.post("/webhook")
@@ -86,6 +104,64 @@ async def webhook(
         logger.warning("webhook rejected: invalid secret")
         raise HTTPException(status_code=401, detail="invalid secret")
 
+    ctx = BotContext(
+        nuxbill=app.state.nuxbill,
+        recharge_using=settings.nuxbill_recharge_using,
+        activate_using=settings.nuxbill_activate_using,
+    )
+
+    if update.callback_query and isinstance(update.callback_query, dict):
+        cb = update.callback_query
+        cb_id = str(cb.get("id") or "")
+        cb_from = cb.get("from") or {}
+        user_id = cb_from.get("id")
+        msg_obj = cb.get("message") or {}
+        chat_obj = msg_obj.get("chat") or {}
+        chat_id = chat_obj.get("id")
+        message_id = msg_obj.get("message_id")
+        data = cb.get("data")
+
+        if not cb_id or not isinstance(chat_id, int) or not isinstance(message_id, int) or not isinstance(data, str):
+            return {"ok": True}
+
+        key = f"{chat_id}:{user_id}"
+        limiter: RateLimiter = app.state.rate_limiter
+        if not limiter.allow(key):
+            background.add_task(_answer_callback, cb_id, "Rate limit. Coba lagi sebentar.")
+            return {"ok": True}
+
+        start_ts = time.time()
+
+        async def _process_cb() -> None:
+            try:
+                result = await asyncio.wait_for(handle_callback(ctx, data), timeout=9.0)
+                ok = True
+            except asyncio.TimeoutError:
+                result = CallbackResult("Timeout saat memproses. Coba lagi.", answer="Timeout")
+                ok = False
+            except Exception:
+                result = CallbackResult("Terjadi kesalahan internal.", answer="Error")
+                ok = False
+
+            try:
+                await _answer_callback(cb_id, result.answer)
+                await _edit_telegram(chat_id, message_id, result.text, reply_markup=result.reply_markup)
+            finally:
+                audit: AuditStore = app.state.audit
+                ev = make_event(
+                    chat_id=chat_id,
+                    user_id=user_id if isinstance(user_id, int) else None,
+                    command="callback",
+                    args=data[:500],
+                    ok=ok,
+                    message=result.text[:4000],
+                    start_ts=start_ts,
+                )
+                await audit.write(ev)
+
+        background.add_task(_process_cb)
+        return {"ok": True}
+
     msg = update.get_message()
     if not msg or not msg.text:
         return {"ok": True}
@@ -99,14 +175,8 @@ async def webhook(
     limiter: RateLimiter = app.state.rate_limiter
     if not limiter.allow(key):
         logger.info("rate_limited chat_id=%s user_id=%s", msg.chat.id, user_id)
-        background.add_task(_send_telegram, msg.chat.id, msg.message_id, "Rate limit. Coba lagi sebentar.")
+        background.add_task(_send_telegram, msg.chat.id, msg.message_id, "Rate limit. Coba lagi sebentar.", reply_markup=None)
         return {"ok": True}
-
-    ctx = BotContext(
-        nuxbill=app.state.nuxbill,
-        recharge_using=settings.nuxbill_recharge_using,
-        activate_using=settings.nuxbill_activate_using,
-    )
 
     start_ts = time.time()
 
@@ -119,17 +189,17 @@ async def webhook(
             " ".join(parsed.args),
         )
         try:
-            text = await asyncio.wait_for(handle_command(ctx, parsed.name, parsed.args), timeout=9.0)
+            reply = await asyncio.wait_for(handle_command(ctx, parsed.name, parsed.args), timeout=9.0)
             ok = True
         except asyncio.TimeoutError:
-            text = "Timeout saat memproses perintah. Coba lagi."
+            reply = BotReply("Timeout saat memproses perintah. Coba lagi.")
             ok = False
         except Exception:
-            text = "Terjadi kesalahan internal."
+            reply = BotReply("Terjadi kesalahan internal.")
             ok = False
 
         try:
-            await _send_telegram(msg.chat.id, msg.message_id, text)
+            await _send_telegram(msg.chat.id, msg.message_id, reply.text, reply_markup=reply.reply_markup)
         finally:
             audit: AuditStore = app.state.audit
             ev = make_event(
@@ -138,7 +208,7 @@ async def webhook(
                 command=parsed.name,
                 args=" ".join(parsed.args),
                 ok=ok,
-                message=text[:4000],
+                message=reply.text[:4000],
                 start_ts=start_ts,
             )
             await audit.write(ev)
