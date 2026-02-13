@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from app.nuxbill.client import NuxBillError
 from app.nuxbill.service import NuxBillService, Package, Plan
-from app.security.validation import validate_page, validate_plan_query, validate_username
+from app.security.validation import validate_page, validate_username
 
 
 @dataclass(frozen=True)
@@ -35,10 +35,10 @@ def help_text() -> str:
         "/customer [page] - daftar customer (interaktif)\n"
         "/status <username> - status detail customer\n"
         "/recharge - pilih customer & paket (interaktif)\n"
-        "/recharge <username> <paket> - recharge customer dengan paket PPPoE\n"
         "/activate <username> - aktifkan kembali customer\n"
         "/deactivate <username> - nonaktifkan customer\n"
-        "/help - bantuan"
+        "/help - menu\n"
+        "/start - menu"
     )
 
 
@@ -62,6 +62,19 @@ def _b64d(value: str) -> str:
 
 def _inline_keyboard(rows: list[list[dict[str, str]]]) -> dict[str, Any]:
     return {"inline_keyboard": rows}
+
+
+def _main_menu_markup() -> dict[str, Any]:
+    return {
+        "keyboard": [
+            [{"text": "/customer"}, {"text": "/recharge"}],
+            [{"text": "/status"}, {"text": "/activate"}],
+            [{"text": "/deactivate"}, {"text": "/help"}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "selective": True,
+    }
 
 
 def _chunk_buttons(buttons: list[dict[str, str]], *, per_row: int = 2) -> list[list[dict[str, str]]]:
@@ -243,7 +256,7 @@ def _build_payment_markup(*, customer_id: int, plan_id: int, server: str, page: 
 async def handle_command(ctx: BotContext, name: str, args: list[str]) -> BotReply:
     try:
         if name in ("help", "start"):
-            return BotReply(help_text())
+            return BotReply("Pilih menu:", reply_markup=_main_menu_markup())
 
         if name == "status":
             if len(args) != 1:
@@ -277,21 +290,11 @@ async def handle_command(ctx: BotContext, name: str, args: list[str]) -> BotRepl
             return BotReply(text, reply_markup=_build_customer_list_markup(status=status, page=page, customers=customers))
 
         if name == "recharge":
-            if not args:
-                status = "Active"
-                page = 1
-                customers = await ctx.nuxbill.list_customers(status_filter=status, page=page)
-                text = f"Pilih customer ({status}, page {page}):"
-                return BotReply(text, reply_markup=_build_customers_markup(status=status, page=page, customers=customers))
-            if len(args) < 2:
-                return BotReply("Format: /recharge <username> <paket>\n\n" + help_text())
-            username = validate_username(args[0])
-            paket = validate_plan_query(" ".join(args[1:]))
-            view = await ctx.nuxbill.get_customer_view_by_username(username)
-            cust = ctx.nuxbill.parse_customer(view)
-            plan = await ctx.nuxbill.find_pppoe_plan_best_match(paket)
-            await ctx.nuxbill.recharge(customer_id=cust.id, plan=plan, using="cash")
-            return BotReply(f"Recharge berhasil untuk {cust.username} dengan paket {plan.name_plan}.")
+            status = "Active"
+            page = 1
+            customers = await ctx.nuxbill.list_customers(status_filter=status, page=page)
+            text = f"Pilih customer ({status}, page {page}):"
+            return BotReply(text, reply_markup=_build_customers_markup(status=status, page=page, customers=customers))
 
         if name == "deactivate":
             if len(args) != 1:
@@ -343,7 +346,7 @@ async def handle_command(ctx: BotContext, name: str, args: list[str]) -> BotRepl
             )
             return BotReply(f"Aktivasi berhasil untuk {cust.username} (plan_id={last_pppoe.plan_id}).")
 
-        return BotReply("Perintah tidak dikenal.\n\n" + help_text())
+        return BotReply("Perintah tidak dikenal.", reply_markup=_main_menu_markup())
     except asyncio.TimeoutError:
         return BotReply("Timeout saat mengakses NuxBill. Coba lagi.")
     except ValueError as exc:

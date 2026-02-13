@@ -8,10 +8,11 @@ Bot ini menerima webhook Telegram dan mengelola customer PPPoE melalui API NuxBi
 - Command:
   - `/customer [page]`
   - `/status <username>`
-  - `/recharge <username> <paket>`
+  - `/recharge`
   - `/activate <username>`
   - `/deactivate <username>`
   - `/help`
+  - `/start`
 - Caching (TTL), retry terbatas, rate limiting, audit log (SQLite)
 
 ## Konfigurasi
