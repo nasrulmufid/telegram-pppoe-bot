@@ -32,7 +32,7 @@ class CallbackResult:
 def help_text() -> str:
     return (
         "Perintah tersedia:\n"
-        "/customer [page] - daftar customer PPPoE (paginasi)\n"
+        "/customer [page] - daftar customer (interaktif)\n"
         "/status <username> - status detail customer\n"
         "/recharge - pilih customer & paket (interaktif)\n"
         "/recharge <username> <paket> - recharge customer dengan paket PPPoE\n"
@@ -140,6 +140,63 @@ def _build_customers_markup(*, status: str, page: int, customers: list[dict[str,
     return _inline_keyboard(rows)
 
 
+def _build_customer_list_markup(*, status: str, page: int, customers: list[dict[str, Any]]) -> dict[str, Any]:
+    buttons: list[dict[str, str]] = []
+    for c in customers:
+        if not isinstance(c, dict):
+            continue
+        if str(c.get("service_type") or "").upper() != "PPPOE":
+            continue
+        try:
+            cid = int(c.get("id") or 0)
+        except Exception:
+            continue
+        if cid <= 0:
+            continue
+        fullname = str(c.get("fullname") or "").strip()
+        username = str(c.get("username") or "").strip()
+        label = fullname or username or f"id={cid}"
+        if fullname and username and fullname != username:
+            label = f"{fullname} ({username})"
+        buttons.append({"text": label[:64], "callback_data": f"cus_v:{cid}:{status}:{page}"})
+
+    rows = _chunk_buttons(buttons, per_row=1)
+
+    nav: list[dict[str, str]] = []
+    if page > 1:
+        nav.append({"text": "⬅️ Prev", "callback_data": f"cus_l:{status}:{page - 1}"})
+    if len(customers) >= 30:
+        nav.append({"text": "Next ➡️", "callback_data": f"cus_l:{status}:{page + 1}"})
+    if nav:
+        rows.append(nav)
+
+    other_status = "Inactive" if status.lower() == "active" else "Active"
+    rows.append([{"text": f"Tampilkan {other_status}", "callback_data": f"cus_l:{other_status}:1"}])
+    return _inline_keyboard(rows)
+
+
+def _first_activation(view: dict[str, Any]) -> Optional[dict[str, Any]]:
+    raw = view.get("activation") or []
+    if not isinstance(raw, list):
+        return None
+    for item in raw:
+        if isinstance(item, dict):
+            return item
+    return None
+
+
+def _build_customer_detail_markup(*, customer_id: int, status: str, page: int) -> dict[str, Any]:
+    return _inline_keyboard(
+        [
+            [
+                {"text": "Deactivate", "callback_data": f"cus_d:{customer_id}:{status}:{page}"},
+                {"text": "Recharge", "callback_data": f"rch_selc:{customer_id}"},
+            ],
+            [{"text": "⬅️ Back", "callback_data": f"cus_l:{status}:{page}"}],
+        ]
+    )
+
+
 def _build_plans_markup(*, customer_id: int, page: int, plans: list[Plan]) -> dict[str, Any]:
     buttons: list[dict[str, str]] = []
     for p in plans:
@@ -214,21 +271,10 @@ async def handle_command(ctx: BotContext, name: str, args: list[str]) -> BotRepl
                 if len(args) != 1:
                     return BotReply("Format: /customer [page]\n\n" + help_text())
                 page = validate_page(args[0])
-            items = await ctx.nuxbill.get_pppoe_customers_page_with_packages(
-                page=page,
-                include_inactive=True,
-                concurrency=10,
-                time_budget_sec=8.5,
-            )
-            if not items:
-                return BotReply("Tidak ada customer PPPoE pada page ini.")
-            header = f"Daftar customer PPPoE (page {page}):"
-            lines = [header]
-            for cust, pkg in items[:30]:
-                lines.append(f"- {cust.fullname} | {cust.username} | {cust.status} | {_fmt_pkg(pkg)}")
-            if len(items) > 30:
-                lines.append(f"... dan {len(items) - 30} lainnya")
-            return BotReply("\n".join(lines))
+            status = "Active"
+            customers = await ctx.nuxbill.list_customers(status_filter=status, page=page)
+            text = f"Daftar customer PPPoE ({status}, page {page}):"
+            return BotReply(text, reply_markup=_build_customer_list_markup(status=status, page=page, customers=customers))
 
         if name == "recharge":
             if not args:
@@ -312,6 +358,70 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
     try:
         if not data:
             return CallbackResult("Perintah tidak dikenali.", answer="Perintah tidak dikenali")
+
+        if data.startswith("cus_l:"):
+            parts = data.split(":", 2)
+            if len(parts) != 3:
+                raise ValueError("Format callback tidak valid")
+            status = parts[1].strip() or "Active"
+            page = _parse_int(parts[2], field="Page")
+            customers = await ctx.nuxbill.list_customers(status_filter=status, page=page)
+            text = f"Daftar customer PPPoE ({status}, page {page}):"
+            return CallbackResult(text, reply_markup=_build_customer_list_markup(status=status, page=page, customers=customers))
+
+        if data.startswith("cus_v:"):
+            parts = data.split(":", 3)
+            if len(parts) != 4:
+                raise ValueError("Format callback tidak valid")
+            customer_id = _parse_int(parts[1], field="Customer ID")
+            status = parts[2].strip() or "Active"
+            page = _parse_int(parts[3], field="Page")
+            view = await ctx.nuxbill.get_customer_view_by_id(customer_id)
+            cust = ctx.nuxbill.parse_customer(view)
+            d = view.get("d") or {}
+            ip = "-"
+            if isinstance(d, dict):
+                ip = str(d.get("pppoe_ip") or d.get("pppoe_ip_address") or d.get("ip") or "-")
+            act = _first_activation(view)
+            recharged_on = str(act.get("recharged_on") or "-") if isinstance(act, dict) else "-"
+            expiration = str(act.get("expiration") or "-") if isinstance(act, dict) else "-"
+            ctype = str(act.get("type") or cust.service_type or "-") if isinstance(act, dict) else (cust.service_type or "-")
+            lines = [
+                f"Nama: {cust.fullname or '-'}",
+                f"Username: {cust.username or '-'}",
+                f"IP: {ip}",
+                f"Recharged on: {recharged_on}",
+                f"Expiration: {expiration}",
+                f"Type: {ctype}",
+            ]
+            return CallbackResult(
+                "\n".join(lines),
+                reply_markup=_build_customer_detail_markup(customer_id=customer_id, status=status, page=page),
+            )
+
+        if data.startswith("cus_d:"):
+            parts = data.split(":", 3)
+            if len(parts) != 4:
+                raise ValueError("Format callback tidak valid")
+            customer_id = _parse_int(parts[1], field="Customer ID")
+            status = parts[2].strip() or "Active"
+            page = _parse_int(parts[3], field="Page")
+            view = await ctx.nuxbill.get_customer_view_by_id(customer_id)
+            cust = ctx.nuxbill.parse_customer(view)
+            pkgs = ctx.nuxbill.parse_packages(view)
+            active = ctx.nuxbill.pick_active_pppoe_package(pkgs)
+            if not active:
+                return CallbackResult(
+                    f"Tidak ada paket PPPoE untuk dinonaktifkan.\n\nUsername: {cust.username}",
+                    reply_markup=_build_customer_detail_markup(customer_id=customer_id, status=status, page=page),
+                    answer="Tidak ada paket",
+                )
+            await ctx.nuxbill.deactivate(customer_id=cust.id, plan_id=active.plan_id)
+            return CallbackResult(
+                f"Deaktivasi berhasil untuk {cust.username} (plan_id={active.plan_id}).",
+                reply_markup=_build_customer_detail_markup(customer_id=customer_id, status=status, page=page),
+                answer="Deaktivasi berhasil",
+            )
 
         if data.startswith("rch_c:"):
             parts = data.split(":", 2)
