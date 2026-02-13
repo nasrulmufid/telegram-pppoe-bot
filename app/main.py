@@ -27,6 +27,17 @@ def _setup_logging(level: str) -> None:
 app = FastAPI(title="Telegram PPPoE Bot (NuxBill)")
 logger = logging.getLogger("telegram_pppoe_bot")
 
+_DENY_TEXT = "Akses ditolak."
+
+
+def _is_allowed_user(settings, user_id: Optional[int]) -> bool:
+    allowed = settings.allowed_user_ids()
+    if not allowed:
+        return True
+    if user_id is None:
+        return False
+    return int(user_id) in allowed
+
 
 @app.on_event("startup")
 async def _startup() -> None:
@@ -123,6 +134,10 @@ async def webhook(
         if not cb_id or not isinstance(chat_id, int) or not isinstance(message_id, int) or not isinstance(data, str):
             return {"ok": True}
 
+        if not _is_allowed_user(settings, user_id if isinstance(user_id, int) else None):
+            background.add_task(_answer_callback, cb_id, _DENY_TEXT)
+            return {"ok": True}
+
         key = f"{chat_id}:{user_id}"
         limiter: RateLimiter = app.state.rate_limiter
         if not limiter.allow(key):
@@ -170,6 +185,9 @@ async def webhook(
         return {"ok": True}
 
     user_id = msg.from_user.id if msg.from_user else None
+    if not _is_allowed_user(settings, user_id):
+        background.add_task(_send_telegram, msg.chat.id, msg.message_id, _DENY_TEXT, reply_markup=None)
+        return {"ok": True}
     key = f"{msg.chat.id}:{user_id}"
     limiter: RateLimiter = app.state.rate_limiter
     if not limiter.allow(key):

@@ -8,6 +8,7 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str
     telegram_webhook_secret: str
+    telegram_allowed_user_ids: str = ""
 
     nuxbill_api_url: str
     nuxbill_username: str
@@ -20,6 +21,21 @@ class Settings(BaseSettings):
 
     audit_db_path: str = "./audit.db"
     log_level: str = "INFO"
+
+    def allowed_user_ids(self) -> set[int]:
+        raw = (self.telegram_allowed_user_ids or "").strip()
+        if not raw:
+            return set()
+        items = raw.replace("\n", ",").replace(" ", ",").split(",")
+        out: set[int] = set()
+        for item in items:
+            v = item.strip()
+            if not v:
+                continue
+            if not v.isdigit():
+                continue
+            out.add(int(v))
+        return out
 
 
 def load_settings() -> Settings:

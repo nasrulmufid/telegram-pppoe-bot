@@ -20,8 +20,21 @@ Salin `.env.example` menjadi `.env` lalu isi nilainya:
 
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_WEBHOOK_SECRET`
+- `TELEGRAM_ALLOWED_USER_IDS` (opsional, daftar user id Telegram dipisah koma)
 - `NUXBILL_API_URL` (contoh `https://domain/system/api.php`)
 - `NUXBILL_USERNAME` / `NUXBILL_PASSWORD`
+
+### Batasi Akses Bot (Allowlist)
+
+Supaya hanya user tertentu yang bisa memakai bot, set `TELEGRAM_ALLOWED_USER_IDS` berisi daftar Telegram user id (angka), dipisah koma.
+
+Contoh:
+
+```env
+TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
+```
+
+Jika `TELEGRAM_ALLOWED_USER_IDS` dikosongkan, bot akan menerima semua user.
 
 ## Menjalankan Lokal
 
