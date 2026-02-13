@@ -173,7 +173,7 @@ def _build_customer_list_markup(*, status: str, page: int, customers: list[dict[
             label = f"{fullname} ({username})"
         buttons.append({"text": label[:64], "callback_data": f"cus_v:{cid}:{status}:{page}"})
 
-    rows = _chunk_buttons(buttons, per_row=1)
+    rows = _chunk_buttons(buttons, per_row=2)
 
     nav: list[dict[str, str]] = []
     if page > 1:
