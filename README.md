@@ -22,6 +22,12 @@ Salin `.env.example` menjadi `.env` lalu isi nilainya:
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_WEBHOOK_SECRET`
 - `TELEGRAM_ALLOWED_USER_IDS` (opsional, daftar user id Telegram dipisah koma)
+- `IP_PUBLIC` (opsional, wajib jika fitur Remote ONU dipakai)
+- `PORT_ONU` (opsional, port publik untuk Remote ONU)
+- `COMMENT_FIREWALL` (opsional, comment rule NAT MikroTik)
+- `MIKROTIK_HOST` (opsional, wajib jika fitur Remote ONU dipakai)
+- `MIKROTIK_USERNAME` / `MIKROTIK_PASSWORD` (opsional, wajib jika fitur Remote ONU dipakai)
+- `MIKROTIK_PORT` (opsional, default 8728)
 - `NUXBILL_API_URL` (contoh `https://domain/system/api.php`)
 - `NUXBILL_USERNAME` / `NUXBILL_PASSWORD`
 
@@ -36,6 +42,23 @@ TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
 ```
 
 Jika `TELEGRAM_ALLOWED_USER_IDS` dikosongkan, bot akan menerima semua user.
+
+### Remote ONU via MikroTik
+
+Fitur ini menambahkan tombol **Remote ONU** pada output `/status <username>`.
+
+Saat tombol ditekan, bot akan membuat atau mengedit rule MikroTik pada `/ip firewall nat` berdasarkan `COMMENT_FIREWALL`:
+- chain: `dstnat`
+- protocol: `tcp`
+- dst-address: `IP_PUBLIC`
+- dst-port: `PORT_ONU`
+- action: `dst-nat`
+- to-addresses: IP PPPoE customer
+- to-ports: `80`
+
+Setelah rule siap, bot mengirim link `http://IP_PUBLIC:PORT_ONU` untuk dibuka di browser.
+
+Jika variabel env Remote ONU tidak diisi, tombol **Remote ONU** tidak akan ditampilkan.
 
 ## Menjalankan Lokal
 

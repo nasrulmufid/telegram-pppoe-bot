@@ -10,6 +10,8 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 
 from app.commands.handlers import BotContext, BotReply, CallbackResult, handle_callback, handle_command
 from app.commands.parser import parse_command
+from app.mikrotik.client import MikrotikConfig
+from app.mikrotik.service import MikrotikService, RemoteOnuConfig
 from app.nuxbill.client import NuxBillClient
 from app.nuxbill.service import NuxBillService
 from app.security.rate_limit import RateLimiter
@@ -62,6 +64,21 @@ async def _startup() -> None:
             http=nux_http,
         )
     )
+    app.state.mikrotik = None
+    if settings.onu_remote_enabled():
+        app.state.mikrotik = MikrotikService(
+            mikrotik=MikrotikConfig(
+                host=settings.mikrotik_host,
+                username=settings.mikrotik_username,
+                password=settings.mikrotik_password,
+                port=settings.mikrotik_port,
+            ),
+            onu=RemoteOnuConfig(
+                ip_public=settings.ip_public,
+                port_onu=settings.port_onu,
+                comment_firewall=settings.comment_firewall,
+            ),
+        )
     app.state.rate_limiter = RateLimiter.create(
         max_requests=settings.bot_rate_limit_max,
         window_sec=settings.bot_rate_limit_window_sec,
@@ -118,6 +135,7 @@ async def webhook(
     ctx = BotContext(
         nuxbill=app.state.nuxbill,
         activate_using=settings.nuxbill_activate_using,
+        mikrotik=app.state.mikrotik,
     )
 
     if update.callback_query and isinstance(update.callback_query, dict):

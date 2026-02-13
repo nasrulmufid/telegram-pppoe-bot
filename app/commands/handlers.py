@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from app.mikrotik.client import MikrotikError
+from app.mikrotik.service import MikrotikService
 from app.nuxbill.client import NuxBillError
 from app.nuxbill.service import NuxBillService, Package, Plan
 from app.security.validation import validate_page, validate_username
@@ -14,6 +17,7 @@ from app.security.validation import validate_page, validate_username
 class BotContext:
     nuxbill: NuxBillService
     activate_using: str
+    mikrotik: Optional[MikrotikService] = None
 
 
 @dataclass(frozen=True)
@@ -207,6 +211,51 @@ def _build_customer_detail_markup(*, customer_id: int, status: str, page: int) -
     )
 
 
+def _build_status_markup(*, customer_id: int, onu_enabled: bool) -> Optional[dict[str, Any]]:
+    if not onu_enabled:
+        return None
+    return _inline_keyboard([[{"text": "Remote ONU", "callback_data": f"onu_go:{customer_id}"}]])
+
+
+def _build_onu_open_markup(*, url: str, customer_id: int) -> dict[str, Any]:
+    return _inline_keyboard(
+        [
+            [{"text": "Buka Remote ONU", "url": url}],
+            [{"text": "⬅️ Back", "callback_data": f"onu_st:{customer_id}"}],
+        ]
+    )
+
+
+def _extract_pppoe_ip(view: dict[str, Any]) -> Optional[str]:
+    d = view.get("d")
+    if not isinstance(d, dict):
+        return None
+    ip = str(d.get("pppoe_ip") or d.get("pppoe_ip_address") or "").strip()
+    return ip or None
+
+
+async def _render_status(ctx: BotContext, *, customer_id: int) -> CallbackResult:
+    view = await ctx.nuxbill.get_customer_view_by_id(customer_id)
+    cust = ctx.nuxbill.parse_customer(view)
+    pkgs = ctx.nuxbill.parse_packages(view)
+    pppoe = ctx.nuxbill.pick_active_pppoe_package(pkgs)
+    lines = [
+        f"Nama: {cust.fullname}",
+        f"Username: {cust.username}",
+        f"Status akun: {cust.status}",
+    ]
+    ip = _extract_pppoe_ip(view)
+    if ip:
+        lines.append(f"IP: {ip}")
+    if cust.pppoe_username:
+        lines.append(f"PPPoE username: {cust.pppoe_username}")
+    if cust.service_type:
+        lines.append(f"Service type: {cust.service_type}")
+    lines.append(f"Paket: {_fmt_pkg(pppoe)}")
+    onu_enabled = ctx.mikrotik is not None
+    return CallbackResult("\n".join(lines), reply_markup=_build_status_markup(customer_id=customer_id, onu_enabled=onu_enabled))
+
+
 def _build_plans_markup(*, customer_id: int, page: int, plans: list[Plan]) -> dict[str, Any]:
     buttons: list[dict[str, str]] = []
     for p in plans:
@@ -261,19 +310,8 @@ async def handle_command(ctx: BotContext, name: str, args: list[str]) -> BotRepl
             username = validate_username(args[0])
             view = await ctx.nuxbill.get_customer_view_by_username(username)
             cust = ctx.nuxbill.parse_customer(view)
-            pkgs = ctx.nuxbill.parse_packages(view)
-            pppoe = ctx.nuxbill.pick_active_pppoe_package(pkgs)
-            lines = [
-                f"Nama: {cust.fullname}",
-                f"Username: {cust.username}",
-                f"Status akun: {cust.status}",
-            ]
-            if cust.pppoe_username:
-                lines.append(f"PPPoE username: {cust.pppoe_username}")
-            if cust.service_type:
-                lines.append(f"Service type: {cust.service_type}")
-            lines.append(f"Paket: {_fmt_pkg(pppoe)}")
-            return BotReply("\n".join(lines))
+            rendered = await _render_status(ctx, customer_id=cust.id)
+            return BotReply(rendered.text, reply_markup=rendered.reply_markup)
 
         if name == "customer":
             page = 1
@@ -358,6 +396,36 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
     try:
         if not data:
             return CallbackResult("Perintah tidak dikenali.", answer="Perintah tidak dikenali")
+
+        if data.startswith("onu_st:"):
+            parts = data.split(":", 1)
+            customer_id = _parse_int(parts[1], field="Customer ID")
+            return await _render_status(ctx, customer_id=customer_id)
+
+        if data.startswith("onu_go:"):
+            if ctx.mikrotik is None:
+                return CallbackResult("Remote ONU belum dikonfigurasi.", answer="Belum dikonfigurasi")
+            parts = data.split(":", 1)
+            customer_id = _parse_int(parts[1], field="Customer ID")
+            view = await ctx.nuxbill.get_customer_view_by_id(customer_id)
+            cust = ctx.nuxbill.parse_customer(view)
+            ip = _extract_pppoe_ip(view)
+            if not ip:
+                return CallbackResult("IP PPPoE customer tidak ditemukan.", answer="IP tidak ada")
+            try:
+                ipaddress.ip_address(ip)
+            except ValueError:
+                return CallbackResult("IP PPPoE customer tidak valid.", answer="IP invalid")
+            result = await ctx.mikrotik.ensure_onu_forward(to_address=ip, to_port=80)
+            url = f"http://{ctx.mikrotik.onu.ip_public.strip()}:{int(ctx.mikrotik.onu.port_onu)}"
+            text = "\n".join(
+                [
+                    f"Remote ONU siap untuk {cust.username}.",
+                    f"Rule: {result.get('action')}",
+                    f"URL: {url}",
+                ]
+            )
+            return CallbackResult(text, reply_markup=_build_onu_open_markup(url=url, customer_id=customer_id), answer="OK")
 
         if data.startswith("cus_l:"):
             parts = data.split(":", 2)
@@ -506,5 +574,7 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
         return CallbackResult(str(exc), answer=str(exc)[:150])
     except NuxBillError as exc:
         return CallbackResult(f"NuxBill error: {exc}", answer="NuxBill error")
+    except MikrotikError as exc:
+        return CallbackResult(f"Mikrotik error: {exc}", answer="Mikrotik error")
     except Exception:
         return CallbackResult("Terjadi kesalahan internal.", answer="Error")
