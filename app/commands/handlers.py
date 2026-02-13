@@ -166,11 +166,8 @@ def _build_customer_list_markup(*, status: str, page: int, customers: list[dict[
             continue
         if cid <= 0:
             continue
-        fullname = str(c.get("fullname") or "").strip()
         username = str(c.get("username") or "").strip()
-        label = fullname or username or f"id={cid}"
-        if fullname and username and fullname != username:
-            label = f"{fullname} ({username})"
+        label = username or f"id={cid}"
         buttons.append({"text": label[:64], "callback_data": f"cus_v:{cid}:{status}:{page}"})
 
     rows = _chunk_buttons(buttons, per_row=2)
