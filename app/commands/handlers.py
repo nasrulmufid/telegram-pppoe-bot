@@ -199,16 +199,18 @@ def _first_activation(view: dict[str, Any]) -> Optional[dict[str, Any]]:
     return None
 
 
-def _build_customer_detail_markup(*, customer_id: int, status: str, page: int) -> dict[str, Any]:
-    return _inline_keyboard(
+def _build_customer_detail_markup(*, customer_id: int, status: str, page: int, onu_enabled: bool) -> dict[str, Any]:
+    rows: list[list[dict[str, str]]] = []
+    if onu_enabled:
+        rows.append([{"text": "Remote ONU", "callback_data": f"cus_onu:{customer_id}:{status}:{page}"}])
+    rows.append(
         [
-            [
-                {"text": "Deactivate", "callback_data": f"cus_d:{customer_id}:{status}:{page}"},
-                {"text": "Recharge", "callback_data": f"rch_selc:{customer_id}"},
-            ],
-            [{"text": "⬅️ Back", "callback_data": f"cus_l:{status}:{page}"}],
+            {"text": "Deactivate", "callback_data": f"cus_d:{customer_id}:{status}:{page}"},
+            {"text": "Recharge", "callback_data": f"rch_selc:{customer_id}"},
         ]
     )
+    rows.append([{"text": "⬅️ Back", "callback_data": f"cus_l:{status}:{page}"}])
+    return _inline_keyboard(rows)
 
 
 def _build_status_markup(*, customer_id: int, onu_enabled: bool) -> Optional[dict[str, Any]]:
@@ -217,11 +219,11 @@ def _build_status_markup(*, customer_id: int, onu_enabled: bool) -> Optional[dic
     return _inline_keyboard([[{"text": "Remote ONU", "callback_data": f"onu_go:{customer_id}"}]])
 
 
-def _build_onu_open_markup(*, url: str, customer_id: int) -> dict[str, Any]:
+def _build_onu_open_markup(*, url: str, back_data: str) -> dict[str, Any]:
     return _inline_keyboard(
         [
             [{"text": "Buka Remote ONU", "url": url}],
-            [{"text": "⬅️ Back", "callback_data": f"onu_st:{customer_id}"}],
+            [{"text": "⬅️ Back", "callback_data": back_data}],
         ]
     )
 
@@ -425,7 +427,49 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
                     f"URL: {url}",
                 ]
             )
-            return CallbackResult(text, reply_markup=_build_onu_open_markup(url=url, customer_id=customer_id), answer="OK")
+            return CallbackResult(text, reply_markup=_build_onu_open_markup(url=url, back_data=f"onu_st:{customer_id}"), answer="OK")
+
+        if data.startswith("cus_onu:"):
+            parts = data.split(":", 3)
+            if len(parts) != 4:
+                raise ValueError("Format callback tidak valid")
+            customer_id = _parse_int(parts[1], field="Customer ID")
+            status = parts[2].strip() or "Active"
+            page = _parse_int(parts[3], field="Page")
+            if ctx.mikrotik is None:
+                return CallbackResult(
+                    "Remote ONU belum dikonfigurasi.",
+                    reply_markup=_build_customer_detail_markup(
+                        customer_id=customer_id,
+                        status=status,
+                        page=page,
+                        onu_enabled=False,
+                    ),
+                    answer="Belum dikonfigurasi",
+                )
+            view = await ctx.nuxbill.get_customer_view_by_id(customer_id)
+            cust = ctx.nuxbill.parse_customer(view)
+            ip = _extract_pppoe_ip(view)
+            if not ip:
+                return CallbackResult("IP PPPoE customer tidak ditemukan.", answer="IP tidak ada")
+            try:
+                ipaddress.ip_address(ip)
+            except ValueError:
+                return CallbackResult("IP PPPoE customer tidak valid.", answer="IP invalid")
+            result = await ctx.mikrotik.ensure_onu_forward(to_address=ip, to_port=80)
+            url = f"http://{ctx.mikrotik.onu.ip_public.strip()}:{int(ctx.mikrotik.onu.port_onu)}"
+            text = "\n".join(
+                [
+                    f"Remote ONU siap untuk {cust.username}.",
+                    f"Rule: {result.get('action')}",
+                    f"URL: {url}",
+                ]
+            )
+            return CallbackResult(
+                text,
+                reply_markup=_build_onu_open_markup(url=url, back_data=f"cus_v:{customer_id}:{status}:{page}"),
+                answer="OK",
+            )
 
         if data.startswith("cus_l:"):
             parts = data.split(":", 2)
@@ -464,7 +508,12 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
             ]
             return CallbackResult(
                 "\n".join(lines),
-                reply_markup=_build_customer_detail_markup(customer_id=customer_id, status=status, page=page),
+                reply_markup=_build_customer_detail_markup(
+                    customer_id=customer_id,
+                    status=status,
+                    page=page,
+                    onu_enabled=ctx.mikrotik is not None,
+                ),
             )
 
         if data.startswith("cus_d:"):
@@ -481,13 +530,23 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
             if not active:
                 return CallbackResult(
                     f"Tidak ada paket PPPoE untuk dinonaktifkan.\n\nUsername: {cust.username}",
-                    reply_markup=_build_customer_detail_markup(customer_id=customer_id, status=status, page=page),
+                    reply_markup=_build_customer_detail_markup(
+                        customer_id=customer_id,
+                        status=status,
+                        page=page,
+                        onu_enabled=ctx.mikrotik is not None,
+                    ),
                     answer="Tidak ada paket",
                 )
             await ctx.nuxbill.deactivate(customer_id=cust.id, plan_id=active.plan_id)
             return CallbackResult(
                 f"Deaktivasi berhasil untuk {cust.username} (plan_id={active.plan_id}).",
-                reply_markup=_build_customer_detail_markup(customer_id=customer_id, status=status, page=page),
+                reply_markup=_build_customer_detail_markup(
+                    customer_id=customer_id,
+                    status=status,
+                    page=page,
+                    onu_enabled=ctx.mikrotik is not None,
+                ),
                 answer="Deaktivasi berhasil",
             )
 
