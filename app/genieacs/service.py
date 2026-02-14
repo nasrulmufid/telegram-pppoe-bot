@@ -47,6 +47,16 @@ class GenieAcsService:
             raise GenieAcsError(f"Virtual parameter {name} tidak ditemukan")
         return value.strip()
 
+    async def resolve_device_id_by_pppoe_username(self, *, pppoe_username: str) -> str:
+        pu = (pppoe_username or "").strip()
+        if not pu:
+            raise GenieAcsError("pppoe_username kosong")
+        dev = await self._client.find_device(query_obj={"VirtualParameters.pppoeUsername._value": pu})
+        device_id = str(dev.get("_id") or "").strip()
+        if not device_id:
+            raise GenieAcsError("DeviceID tidak ditemukan di data GenieACS")
+        return device_id
+
     async def set_wifi_ssid(self, *, device_id: str, ssid: str) -> int:
         pv = [[self._wifi.ssid_path, ssid, "xsd:string"]]
         status, _ = await self._client.post_task_set_params(device_id=device_id, parameter_values=pv, connection_request=True)
@@ -56,4 +66,3 @@ class GenieAcsService:
         pv = [[self._wifi.password_path, password, "xsd:string"]]
         status, _ = await self._client.post_task_set_params(device_id=device_id, parameter_values=pv, connection_request=True)
         return status
-

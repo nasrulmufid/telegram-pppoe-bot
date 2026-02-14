@@ -64,7 +64,7 @@ Jika variabel env Remote ONU tidak diisi, tombol **Remote ONU** tidak akan ditam
 
 Bot terintegrasi dengan GenieACS NBI memakai Basic Auth.
 
-- Mapping customer → device: bot memakai field `pppoe_username` dari NuxBill sebagai GenieACS `DeviceID`.
+- Mapping customer → device: bot mencari device GenieACS berdasarkan Virtual Parameter `pppoeUsername` yang sama dengan field `pppoe_username` dari NuxBill.
 - Tombol di detail customer `/customer`: **Ganti SSID** dan **Ganti Password**.
 - Parameter yang diubah (TR-069):
   - `InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID`

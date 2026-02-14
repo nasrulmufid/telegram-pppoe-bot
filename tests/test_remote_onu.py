@@ -5,7 +5,7 @@ from app.nuxbill.service import Customer
 
 class DummyNuxBill:
     async def get_customer_view_by_id(self, customer_id: int):
-        return {"d": {"pppoe_username": "DEVICEID"}}
+        return {"d": {"pppoe_username": "PPPOEUSER"}}
 
     def parse_customer(self, view):
         return Customer(
@@ -14,7 +14,7 @@ class DummyNuxBill:
             fullname="ABEL",
             status="Active",
             service_type="PPPoE",
-            pppoe_username="DEVICEID",
+            pppoe_username="PPPOEUSER",
         )
 
 
@@ -29,6 +29,10 @@ class DummyMikrotik:
 
 
 class DummyGenieAcs:
+    async def resolve_device_id_by_pppoe_username(self, *, pppoe_username: str) -> str:
+        assert pppoe_username == "PPPOEUSER"
+        return "DEVICEID"
+
     async def get_virtual_param(self, *, device_id: str, name: str) -> str:
         assert device_id == "DEVICEID"
         assert name == "IPTR069"

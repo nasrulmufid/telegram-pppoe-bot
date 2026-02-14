@@ -5,7 +5,7 @@ from app.storage.pending import PendingStore
 
 class DummyNuxBill:
     async def get_customer_view_by_id(self, customer_id: int):
-        return {"d": {"pppoe_username": "DEVICEID"}}
+        return {"d": {"pppoe_username": "PPPOEUSER"}}
 
     def parse_customer(self, view):
         return Customer(
@@ -14,13 +14,17 @@ class DummyNuxBill:
             fullname="ABEL",
             status="Active",
             service_type="PPPoE",
-            pppoe_username="DEVICEID",
+            pppoe_username="PPPOEUSER",
         )
 
 
 class DummyGenieAcs:
     def __init__(self) -> None:
         self.last = None
+
+    async def resolve_device_id_by_pppoe_username(self, *, pppoe_username: str) -> str:
+        assert pppoe_username == "PPPOEUSER"
+        return "DEVICEID"
 
     async def set_wifi_ssid(self, *, device_id: str, ssid: str) -> int:
         self.last = ("ssid", device_id, ssid)
@@ -65,4 +69,3 @@ async def test_wifi_password_flow_queued():
     res3 = await handle_callback(ctx, apply_cb)
     assert "menunggu" in res3.text.lower()
     assert genie.last == ("password", "DEVICEID", "password123")
-

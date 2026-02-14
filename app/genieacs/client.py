@@ -24,11 +24,8 @@ class GenieAcsClient:
         self._config = config
         self._http = http
 
-    async def find_device_by_id(self, device_id: str, *, projection: Optional[list[str]] = None) -> dict[str, Any]:
-        did = (device_id or "").strip()
-        if not did:
-            raise GenieAcsError("DeviceID kosong")
-        query = json.dumps({"_id": did}, separators=(",", ":"))
+    async def find_device(self, *, query_obj: dict[str, Any], projection: Optional[list[str]] = None) -> dict[str, Any]:
+        query = json.dumps(query_obj, separators=(",", ":"))
         params: dict[str, Any] = {"query": query}
         if projection:
             params["projection"] = ",".join(projection)
@@ -40,6 +37,12 @@ class GenieAcsClient:
         if not isinstance(data[0], dict):
             raise GenieAcsError("Format data GenieACS tidak dikenali")
         return data[0]
+
+    async def find_device_by_id(self, device_id: str, *, projection: Optional[list[str]] = None) -> dict[str, Any]:
+        did = (device_id or "").strip()
+        if not did:
+            raise GenieAcsError("DeviceID kosong")
+        return await self.find_device(query_obj={"_id": did}, projection=projection)
 
     async def post_task_set_params(
         self,

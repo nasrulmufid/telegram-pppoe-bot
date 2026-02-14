@@ -250,9 +250,9 @@ def _build_confirm_markup(action_id: str) -> dict[str, Any]:
 def _device_id_from_customer(view: dict[str, Any]) -> Optional[str]:
     d = view.get("d")
     if isinstance(d, dict):
-        did = str(d.get("pppoe_username") or "").strip()
-        if did:
-            return did
+        v = str(d.get("pppoe_username") or "").strip()
+        if v:
+            return v
     return None
 
 
@@ -482,9 +482,10 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
             customer_id = _parse_int(parts[1], field="Customer ID")
             view = await ctx.nuxbill.get_customer_view_by_id(customer_id)
             cust = ctx.nuxbill.parse_customer(view)
-            device_id = _device_id_from_customer(view)
-            if not device_id:
-                return CallbackResult("DeviceID tidak ditemukan (cek pppoe_username).", answer="DeviceID kosong")
+            pppoe_username = _device_id_from_customer(view)
+            if not pppoe_username:
+                return CallbackResult("pppoe_username tidak ditemukan di NuxBill.", answer="pppoe_username kosong")
+            device_id = await ctx.genieacs.resolve_device_id_by_pppoe_username(pppoe_username=pppoe_username)
             ip = await ctx.genieacs.get_virtual_param(device_id=device_id, name="IPTR069")
             try:
                 ipaddress.ip_address(ip)
@@ -521,9 +522,10 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
                 )
             view = await ctx.nuxbill.get_customer_view_by_id(customer_id)
             cust = ctx.nuxbill.parse_customer(view)
-            device_id = _device_id_from_customer(view)
-            if not device_id:
-                return CallbackResult("DeviceID tidak ditemukan (cek pppoe_username).", answer="DeviceID kosong")
+            pppoe_username = _device_id_from_customer(view)
+            if not pppoe_username:
+                return CallbackResult("pppoe_username tidak ditemukan di NuxBill.", answer="pppoe_username kosong")
+            device_id = await ctx.genieacs.resolve_device_id_by_pppoe_username(pppoe_username=pppoe_username)
             ip = await ctx.genieacs.get_virtual_param(device_id=device_id, name="IPTR069")
             try:
                 ipaddress.ip_address(ip)
@@ -594,10 +596,11 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
             status = parts[2].strip() or "Active"
             page = _parse_int(parts[3], field="Page")
             view = await ctx.nuxbill.get_customer_view_by_id(customer_id)
-            did = _device_id_from_customer(view)
-            if not did:
-                return CallbackResult("DeviceID tidak ditemukan (cek pppoe_username).", answer="DeviceID kosong")
-            action = PendingAction(kind=kind, customer_id=customer_id, status=status, page=page, device_id=did)
+            pppoe_username = _device_id_from_customer(view)
+            if not pppoe_username:
+                return CallbackResult("pppoe_username tidak ditemukan di NuxBill.", answer="pppoe_username kosong")
+            device_id = await ctx.genieacs.resolve_device_id_by_pppoe_username(pppoe_username=pppoe_username)
+            action = PendingAction(kind=kind, customer_id=customer_id, status=status, page=page, device_id=device_id)
             chat_key = PendingStore.key(ctx.chat_id, ctx.user_id)
             ctx.pending.clear_chat(chat_key)
             action_id = ctx.pending.start(chat_key=chat_key, action=action)
