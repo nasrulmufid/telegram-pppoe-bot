@@ -23,6 +23,7 @@ class TelegramClient:
         reply_to_message_id: Optional[int] = None,
         disable_web_page_preview: bool = True,
         reply_markup: Optional[dict[str, Any]] = None,
+        parse_mode: Optional[str] = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "chat_id": chat_id,
@@ -33,6 +34,8 @@ class TelegramClient:
             payload["reply_to_message_id"] = reply_to_message_id
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
+        if parse_mode is not None:
+            payload["parse_mode"] = parse_mode
 
         resp = await self.http.post(f"{self._base_url}/sendMessage", json=payload)
         resp.raise_for_status()
@@ -46,6 +49,7 @@ class TelegramClient:
         text: str,
         disable_web_page_preview: bool = True,
         reply_markup: Optional[dict[str, Any]] = None,
+        parse_mode: Optional[str] = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "chat_id": chat_id,
@@ -55,6 +59,8 @@ class TelegramClient:
         }
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
+        if parse_mode is not None:
+            payload["parse_mode"] = parse_mode
         resp = await self.http.post(f"{self._base_url}/editMessageText", json=payload)
         resp.raise_for_status()
         return resp.json()

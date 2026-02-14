@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import ipaddress
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -31,6 +32,7 @@ class BotContext:
 class BotReply:
     text: str
     reply_markup: Optional[dict[str, Any]] = None
+    parse_mode: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,7 @@ class CallbackResult:
     text: str
     reply_markup: Optional[dict[str, Any]] = None
     answer: Optional[str] = None
+    parse_mode: Optional[str] = None
 
 
 def help_text() -> str:
@@ -647,13 +650,27 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
             recharged_on = str(act.get("recharged_on") or "-") if isinstance(act, dict) else "-"
             expiration = str(act.get("expiration") or "-") if isinstance(act, dict) else "-"
             ctype = str(act.get("type") or cust.service_type or "-") if isinstance(act, dict) else (cust.service_type or "-")
+            rxpower = "-"
+            if ctx.genieacs is not None:
+                try:
+                    pppoe_username = _pppoe_username_from_customer(view)
+                    if pppoe_username:
+                        device_id = await ctx.genieacs.resolve_device_id_by_pppoe_username(pppoe_username=pppoe_username)
+                        rxpower = await ctx.genieacs.get_virtual_param(device_id=device_id, name="RXPower")
+                except GenieAcsError:
+                    rxpower = "-"
+            rx = str(rxpower or "-").strip() or "-"
+            if rx != "-" and "dbm" not in rx.lower():
+                rx = f"{rx} dBm"
+            esc = lambda s: html.escape(str(s), quote=False)
             lines = [
-                f"Nama: {cust.fullname or '-'}",
-                f"Username: {cust.username or '-'}",
-                f"IP: {ip}",
-                f"Recharged on: {recharged_on}",
-                f"Expiration: {expiration}",
-                f"Type: {ctype}",
+                f"Nama: {esc(cust.fullname or '-')}",
+                f"Username: {esc(cust.username or '-')}",
+                f"IP: {esc(ip)}",
+                f"Recharged on: {esc(recharged_on)}",
+                f"Expiration: {esc(expiration)}",
+                f"Type: {esc(ctype)}",
+                f"RXPower: <b>{esc(rx)}</b>",
             ]
             return CallbackResult(
                 "\n".join(lines),
@@ -663,6 +680,7 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
                     page=page,
                     onu_enabled=ctx.mikrotik is not None and ctx.genieacs is not None,
                 ),
+                parse_mode="HTML",
             )
 
         if data.startswith("cus_d:"):

@@ -130,15 +130,30 @@ async def _send_telegram(
     text: str,
     *,
     reply_markup: Optional[dict] = None,
+    parse_mode: Optional[str] = None,
 ) -> None:
     telegram: TelegramClient = app.state.telegram
-    await telegram.send_message(chat_id=chat_id, text=text, reply_to_message_id=reply_to, reply_markup=reply_markup)
+    await telegram.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_to_message_id=reply_to,
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+    )
 
 
 @retry_telegram()
-async def _edit_telegram(chat_id: int, message_id: int, text: str, *, reply_markup: Optional[dict] = None) -> None:
+async def _edit_telegram(
+    chat_id: int, message_id: int, text: str, *, reply_markup: Optional[dict] = None, parse_mode: Optional[str] = None
+) -> None:
     telegram: TelegramClient = app.state.telegram
-    await telegram.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup)
+    await telegram.edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=text,
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+    )
 
 
 @retry_telegram()
@@ -210,7 +225,13 @@ async def webhook(
 
             try:
                 await _answer_callback(cb_id, result.answer)
-                await _edit_telegram(chat_id, message_id, result.text, reply_markup=result.reply_markup)
+                await _edit_telegram(
+                    chat_id,
+                    message_id,
+                    result.text,
+                    reply_markup=result.reply_markup,
+                    parse_mode=getattr(result, "parse_mode", None),
+                )
             finally:
                 audit: AuditStore = app.state.audit
                 ev = make_event(
@@ -262,7 +283,13 @@ async def webhook(
                 ok = False
 
             try:
-                await _send_telegram(msg.chat.id, msg.message_id, reply.text, reply_markup=reply.reply_markup)
+                await _send_telegram(
+                    msg.chat.id,
+                    msg.message_id,
+                    reply.text,
+                    reply_markup=reply.reply_markup,
+                    parse_mode=getattr(reply, "parse_mode", None),
+                )
             finally:
                 audit: AuditStore = app.state.audit
                 ev = make_event(
@@ -304,7 +331,13 @@ async def webhook(
             ok = False
 
         try:
-            await _send_telegram(msg.chat.id, msg.message_id, reply.text, reply_markup=reply.reply_markup)
+            await _send_telegram(
+                msg.chat.id,
+                msg.message_id,
+                reply.text,
+                reply_markup=reply.reply_markup,
+                parse_mode=getattr(reply, "parse_mode", None),
+            )
         finally:
             audit: AuditStore = app.state.audit
             ev = make_event(
