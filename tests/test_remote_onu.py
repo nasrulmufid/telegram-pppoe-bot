@@ -5,7 +5,7 @@ from app.nuxbill.service import Customer
 
 class DummyNuxBill:
     async def get_customer_view_by_id(self, customer_id: int):
-        return {"d": {"pppoe_ip": "172.2.1.37"}}
+        return {"d": {"pppoe_username": "DEVICEID"}}
 
     def parse_customer(self, view):
         return Customer(
@@ -14,7 +14,7 @@ class DummyNuxBill:
             fullname="ABEL",
             status="Active",
             service_type="PPPoE",
-            pppoe_username=None,
+            pppoe_username="DEVICEID",
         )
 
 
@@ -28,6 +28,13 @@ class DummyMikrotik:
         return {"action": "created"}
 
 
+class DummyGenieAcs:
+    async def get_virtual_param(self, *, device_id: str, name: str) -> str:
+        assert device_id == "DEVICEID"
+        assert name == "IPTR069"
+        return "172.2.1.37"
+
+
 async def test_onu_go_requires_config():
     ctx = BotContext(nuxbill=DummyNuxBill(), activate_using="zero", mikrotik=None)
     res = await handle_callback(ctx, "onu_go:41")
@@ -35,7 +42,7 @@ async def test_onu_go_requires_config():
 
 
 async def test_onu_go_returns_url_button():
-    ctx = BotContext(nuxbill=DummyNuxBill(), activate_using="zero", mikrotik=DummyMikrotik())
+    ctx = BotContext(nuxbill=DummyNuxBill(), activate_using="zero", mikrotik=DummyMikrotik(), genieacs=DummyGenieAcs())
     res = await handle_callback(ctx, "onu_go:41")
     assert "http://103.104.1.1:12500" in res.text
     assert res.reply_markup is not None

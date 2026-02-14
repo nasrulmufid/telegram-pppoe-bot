@@ -53,12 +53,27 @@ Saat tombol ditekan, bot akan membuat atau mengedit rule MikroTik pada `/ip fire
 - dst-address: `IP_PUBLIC`
 - dst-port: `PORT_ONU`
 - action: `dst-nat`
-- to-addresses: IP PPPoE customer
+- to-addresses: IPTR069 (Virtual Parameter GenieACS)
 - to-ports: `80`
 
 Setelah rule siap, bot mengirim link `http://IP_PUBLIC:PORT_ONU` untuk dibuka di browser.
 
 Jika variabel env Remote ONU tidak diisi, tombol **Remote ONU** tidak akan ditampilkan.
+
+### Integrasi GenieACS (Ganti SSID/Password)
+
+Bot terintegrasi dengan GenieACS NBI memakai Basic Auth.
+
+- Mapping customer → device: bot memakai field `pppoe_username` dari NuxBill sebagai GenieACS `DeviceID`.
+- Tombol di detail customer `/customer`: **Ganti SSID** dan **Ganti Password**.
+- Parameter yang diubah (TR-069):
+  - `InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID`
+  - `InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.KeyPassphrase`
+- Setelah nilai dikonfirmasi, bot mengirim task `setParameterValues` ke endpoint `/devices/<device_id>/tasks?connection_request`.
+
+### IPTR069 untuk Remote ONU
+
+Remote ONU menggunakan IP tujuan dari GenieACS Virtual Parameter `IPTR069` (bukan dari IP PPPoE NuxBill).
 
 ## Menjalankan Lokal
 

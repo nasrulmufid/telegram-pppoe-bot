@@ -6,11 +6,14 @@ import ipaddress
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from app.genieacs.client import GenieAcsError
+from app.genieacs.service import GenieAcsService
 from app.mikrotik.client import MikrotikError
 from app.mikrotik.service import MikrotikService
 from app.nuxbill.client import NuxBillError
 from app.nuxbill.service import NuxBillService, Package, Plan
 from app.security.validation import validate_page, validate_username
+from app.storage.pending import PendingAction, PendingStore
 
 
 @dataclass(frozen=True)
@@ -18,6 +21,10 @@ class BotContext:
     nuxbill: NuxBillService
     activate_using: str
     mikrotik: Optional[MikrotikService] = None
+    genieacs: Optional[GenieAcsService] = None
+    pending: Optional[PendingStore] = None
+    chat_id: int = 0
+    user_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -205,6 +212,12 @@ def _build_customer_detail_markup(*, customer_id: int, status: str, page: int, o
         rows.append([{"text": "Remote ONU", "callback_data": f"cus_onu:{customer_id}:{status}:{page}"}])
     rows.append(
         [
+            {"text": "Ganti SSID", "callback_data": f"wifi_ssid:{customer_id}:{status}:{page}"},
+            {"text": "Ganti Password", "callback_data": f"wifi_pwd:{customer_id}:{status}:{page}"},
+        ]
+    )
+    rows.append(
+        [
             {"text": "Deactivate", "callback_data": f"cus_d:{customer_id}:{status}:{page}"},
             {"text": "Recharge", "callback_data": f"rch_selc:{customer_id}"},
         ]
@@ -217,6 +230,30 @@ def _build_status_markup(*, customer_id: int, onu_enabled: bool) -> Optional[dic
     if not onu_enabled:
         return None
     return _inline_keyboard([[{"text": "Remote ONU", "callback_data": f"onu_go:{customer_id}"}]])
+
+
+def _build_cancel_markup(action_id: str) -> dict[str, Any]:
+    return _inline_keyboard([[{"text": "Batal", "callback_data": f"wifi_cancel:{action_id}"}]])
+
+
+def _build_confirm_markup(action_id: str) -> dict[str, Any]:
+    return _inline_keyboard(
+        [
+            [
+                {"text": "Ya, Terapkan", "callback_data": f"wifi_apply:{action_id}"},
+                {"text": "Batal", "callback_data": f"wifi_cancel:{action_id}"},
+            ]
+        ]
+    )
+
+
+def _device_id_from_customer(view: dict[str, Any]) -> Optional[str]:
+    d = view.get("d")
+    if isinstance(d, dict):
+        did = str(d.get("pppoe_username") or "").strip()
+        if did:
+            return did
+    return None
 
 
 def _build_onu_open_markup(*, url: str, back_data: str) -> dict[str, Any]:
@@ -254,7 +291,7 @@ async def _render_status(ctx: BotContext, *, customer_id: int) -> CallbackResult
     if cust.service_type:
         lines.append(f"Service type: {cust.service_type}")
     lines.append(f"Paket: {_fmt_pkg(pppoe)}")
-    onu_enabled = ctx.mikrotik is not None
+    onu_enabled = ctx.mikrotik is not None and ctx.genieacs is not None
     return CallbackResult("\n".join(lines), reply_markup=_build_status_markup(customer_id=customer_id, onu_enabled=onu_enabled))
 
 
@@ -303,6 +340,40 @@ def _build_payment_markup(*, customer_id: int, plan_id: int, server: str, page: 
 
 async def handle_command(ctx: BotContext, name: str, args: list[str]) -> BotReply:
     try:
+        if name == "pending_input":
+            if ctx.pending is None:
+                return BotReply("Fitur input belum tersedia.")
+            if len(args) != 2:
+                return BotReply("Format input tidak valid.")
+            action_id = str(args[0] or "")
+            text = str(args[1] or "").strip()
+            action = ctx.pending.get_by_id(action_id)
+            if action is None:
+                return BotReply("Permintaan sudah kadaluarsa.")
+            if action.kind == "ssid":
+                value = text.strip()
+                if len(value) < 1 or len(value) > 32:
+                    return BotReply("SSID tidak valid (1-32 karakter).", reply_markup=_build_cancel_markup(action_id))
+                action.value = value
+                action.stage = "confirm"
+                ctx.pending.set_by_id(action_id, action)
+                return BotReply(
+                    f"Konfirmasi ganti SSID menjadi:\n{value}\n\nLanjutkan?",
+                    reply_markup=_build_confirm_markup(action_id),
+                )
+            if action.kind == "password":
+                value = text
+                if len(value) < 8:
+                    return BotReply("Password minimal 8 karakter.", reply_markup=_build_cancel_markup(action_id))
+                action.value = value
+                action.stage = "confirm"
+                ctx.pending.set_by_id(action_id, action)
+                return BotReply(
+                    "Konfirmasi ganti password WiFi.\n\nLanjutkan?",
+                    reply_markup=_build_confirm_markup(action_id),
+                )
+            return BotReply("Permintaan tidak dikenali.")
+
         if name in ("help", "start"):
             return BotReply("Pilih menu:", reply_markup=_main_menu_markup())
 
@@ -405,19 +476,20 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
             return await _render_status(ctx, customer_id=customer_id)
 
         if data.startswith("onu_go:"):
-            if ctx.mikrotik is None:
+            if ctx.mikrotik is None or ctx.genieacs is None:
                 return CallbackResult("Remote ONU belum dikonfigurasi.", answer="Belum dikonfigurasi")
             parts = data.split(":", 1)
             customer_id = _parse_int(parts[1], field="Customer ID")
             view = await ctx.nuxbill.get_customer_view_by_id(customer_id)
             cust = ctx.nuxbill.parse_customer(view)
-            ip = _extract_pppoe_ip(view)
-            if not ip:
-                return CallbackResult("IP PPPoE customer tidak ditemukan.", answer="IP tidak ada")
+            device_id = _device_id_from_customer(view)
+            if not device_id:
+                return CallbackResult("DeviceID tidak ditemukan (cek pppoe_username).", answer="DeviceID kosong")
+            ip = await ctx.genieacs.get_virtual_param(device_id=device_id, name="IPTR069")
             try:
                 ipaddress.ip_address(ip)
             except ValueError:
-                return CallbackResult("IP PPPoE customer tidak valid.", answer="IP invalid")
+                return CallbackResult("IPTR069 tidak valid.", answer="IP invalid")
             result = await ctx.mikrotik.ensure_onu_forward(to_address=ip, to_port=80)
             url = f"http://{ctx.mikrotik.onu.ip_public.strip()}:{int(ctx.mikrotik.onu.port_onu)}"
             text = "\n".join(
@@ -436,7 +508,7 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
             customer_id = _parse_int(parts[1], field="Customer ID")
             status = parts[2].strip() or "Active"
             page = _parse_int(parts[3], field="Page")
-            if ctx.mikrotik is None:
+            if ctx.mikrotik is None or ctx.genieacs is None:
                 return CallbackResult(
                     "Remote ONU belum dikonfigurasi.",
                     reply_markup=_build_customer_detail_markup(
@@ -449,13 +521,14 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
                 )
             view = await ctx.nuxbill.get_customer_view_by_id(customer_id)
             cust = ctx.nuxbill.parse_customer(view)
-            ip = _extract_pppoe_ip(view)
-            if not ip:
-                return CallbackResult("IP PPPoE customer tidak ditemukan.", answer="IP tidak ada")
+            device_id = _device_id_from_customer(view)
+            if not device_id:
+                return CallbackResult("DeviceID tidak ditemukan (cek pppoe_username).", answer="DeviceID kosong")
+            ip = await ctx.genieacs.get_virtual_param(device_id=device_id, name="IPTR069")
             try:
                 ipaddress.ip_address(ip)
             except ValueError:
-                return CallbackResult("IP PPPoE customer tidak valid.", answer="IP invalid")
+                return CallbackResult("IPTR069 tidak valid.", answer="IP invalid")
             result = await ctx.mikrotik.ensure_onu_forward(to_address=ip, to_port=80)
             url = f"http://{ctx.mikrotik.onu.ip_public.strip()}:{int(ctx.mikrotik.onu.port_onu)}"
             text = "\n".join(
@@ -468,6 +541,75 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
             return CallbackResult(
                 text,
                 reply_markup=_build_onu_open_markup(url=url, back_data=f"cus_v:{customer_id}:{status}:{page}"),
+                answer="OK",
+            )
+
+        if data.startswith("wifi_cancel:"):
+            if ctx.pending is None:
+                return CallbackResult("Tidak ada aksi yang bisa dibatalkan.", answer="OK")
+            action_id = data.split(":", 1)[1].strip()
+            ctx.pending.delete_by_id(action_id)
+            if ctx.user_id is not None:
+                ctx.pending.clear_chat(PendingStore.key(ctx.chat_id, ctx.user_id))
+            return CallbackResult("Dibatalkan.", answer="OK")
+
+        if data.startswith("wifi_apply:"):
+            if ctx.pending is None or ctx.genieacs is None:
+                return CallbackResult("Fitur GenieACS belum dikonfigurasi.", answer="Belum dikonfigurasi")
+            action_id = data.split(":", 1)[1].strip()
+            action = ctx.pending.get_by_id(action_id)
+            if action is None:
+                return CallbackResult("Permintaan sudah kadaluarsa.", answer="Kadaluarsa")
+            if not action.value.strip():
+                return CallbackResult("Nilai belum diisi.", answer="Belum ada nilai")
+            if action.kind == "ssid":
+                status_code = await ctx.genieacs.set_wifi_ssid(device_id=action.device_id, ssid=action.value)
+                msg = "SSID berhasil diterapkan." if status_code == 200 else "SSID dikirim (menunggu perangkat)."
+            elif action.kind == "password":
+                status_code = await ctx.genieacs.set_wifi_password(device_id=action.device_id, password=action.value)
+                msg = "Password berhasil diterapkan." if status_code == 200 else "Password dikirim (menunggu perangkat)."
+            else:
+                return CallbackResult("Permintaan tidak dikenali.", answer="Error")
+            if ctx.user_id is not None:
+                ctx.pending.clear_chat(PendingStore.key(ctx.chat_id, ctx.user_id))
+            ctx.pending.delete_by_id(action_id)
+            return CallbackResult(
+                msg,
+                reply_markup=_inline_keyboard([[{"text": "⬅️ Back", "callback_data": f"cus_v:{action.customer_id}:{action.status}:{action.page}"}]]),
+                answer="OK",
+            )
+
+        if data.startswith("wifi_ssid:") or data.startswith("wifi_pwd:"):
+            if ctx.pending is None:
+                return CallbackResult("Fitur input belum tersedia.", answer="Error")
+            if ctx.genieacs is None:
+                return CallbackResult("GenieACS belum dikonfigurasi.", answer="Belum dikonfigurasi")
+            if ctx.user_id is None:
+                return CallbackResult("User tidak dikenali.", answer="Error")
+            parts = data.split(":", 3)
+            if len(parts) != 4:
+                raise ValueError("Format callback tidak valid")
+            kind = "ssid" if parts[0] == "wifi_ssid" else "password"
+            customer_id = _parse_int(parts[1], field="Customer ID")
+            status = parts[2].strip() or "Active"
+            page = _parse_int(parts[3], field="Page")
+            view = await ctx.nuxbill.get_customer_view_by_id(customer_id)
+            did = _device_id_from_customer(view)
+            if not did:
+                return CallbackResult("DeviceID tidak ditemukan (cek pppoe_username).", answer="DeviceID kosong")
+            action = PendingAction(kind=kind, customer_id=customer_id, status=status, page=page, device_id=did)
+            chat_key = PendingStore.key(ctx.chat_id, ctx.user_id)
+            ctx.pending.clear_chat(chat_key)
+            action_id = ctx.pending.start(chat_key=chat_key, action=action)
+            if kind == "ssid":
+                return CallbackResult(
+                    "Ketik SSID baru (2.4GHz):",
+                    reply_markup=_build_cancel_markup(action_id),
+                    answer="OK",
+                )
+            return CallbackResult(
+                "Ketik Password WiFi baru (minimal 8 karakter):",
+                reply_markup=_build_cancel_markup(action_id),
                 answer="OK",
             )
 
@@ -512,7 +654,7 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
                     customer_id=customer_id,
                     status=status,
                     page=page,
-                    onu_enabled=ctx.mikrotik is not None,
+                    onu_enabled=ctx.mikrotik is not None and ctx.genieacs is not None,
                 ),
             )
 
@@ -633,6 +775,8 @@ async def handle_callback(ctx: BotContext, data: str) -> CallbackResult:
         return CallbackResult(str(exc), answer=str(exc)[:150])
     except NuxBillError as exc:
         return CallbackResult(f"NuxBill error: {exc}", answer="NuxBill error")
+    except GenieAcsError as exc:
+        return CallbackResult(f"GenieACS error: {exc}", answer="GenieACS error")
     except MikrotikError as exc:
         return CallbackResult(f"Mikrotik error: {exc}", answer="Mikrotik error")
     except Exception:

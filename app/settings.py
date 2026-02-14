@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     mikrotik_password: str = ""
     mikrotik_port: int = 8728
 
+    genieacs_base_url: str = ""
+    genieacs_username: str = ""
+    genieacs_password: str = ""
+
     nuxbill_api_url: str
     nuxbill_username: str
     nuxbill_password: str
@@ -60,6 +64,15 @@ class Settings(BaseSettings):
         if not self.mikrotik_password.strip():
             return False
         if self.mikrotik_port <= 0:
+            return False
+        return True
+
+    def genieacs_enabled(self) -> bool:
+        if not self.genieacs_base_url.strip():
+            return False
+        if not self.genieacs_username.strip():
+            return False
+        if not self.genieacs_password.strip():
             return False
         return True
 

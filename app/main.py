@@ -10,6 +10,8 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 
 from app.commands.handlers import BotContext, BotReply, CallbackResult, handle_callback, handle_command
 from app.commands.parser import parse_command
+from app.genieacs.client import GenieAcsClient, GenieAcsConfig
+from app.genieacs.service import GenieAcsService
 from app.mikrotik.client import MikrotikConfig
 from app.mikrotik.service import MikrotikService, RemoteOnuConfig
 from app.nuxbill.client import NuxBillClient
@@ -17,6 +19,7 @@ from app.nuxbill.service import NuxBillService
 from app.security.rate_limit import RateLimiter
 from app.settings import load_settings
 from app.storage.audit import AuditStore, make_event
+from app.storage.pending import PendingStore
 from app.telegram.client import TelegramClient
 from app.telegram.models import Update
 from app.util.retry import retry_telegram
@@ -51,10 +54,20 @@ async def _startup() -> None:
     http = httpx.AsyncClient(limits=limits, timeout=timeout)
 
     nux_http = httpx.AsyncClient(limits=limits, timeout=timeout)
+    if settings.genieacs_enabled():
+        genie_http = httpx.AsyncClient(
+            base_url=settings.genieacs_base_url.rstrip("/"),
+            auth=(settings.genieacs_username, settings.genieacs_password),
+            limits=limits,
+            timeout=timeout,
+        )
+    else:
+        genie_http = httpx.AsyncClient(limits=limits, timeout=timeout)
 
     app.state.settings = settings
     app.state.http = http
     app.state.nux_http = nux_http
+    app.state.genie_http = genie_http
     app.state.telegram = TelegramClient(bot_token=settings.telegram_bot_token, http=http)
     app.state.nuxbill = NuxBillService(
         NuxBillClient(
@@ -79,6 +92,19 @@ async def _startup() -> None:
                 comment_firewall=settings.comment_firewall,
             ),
         )
+    app.state.genieacs = None
+    if settings.genieacs_enabled():
+        app.state.genieacs = GenieAcsService(
+            GenieAcsClient(
+                config=GenieAcsConfig(
+                    base_url=settings.genieacs_base_url,
+                    username=settings.genieacs_username,
+                    password=settings.genieacs_password,
+                ),
+                http=genie_http,
+            )
+        )
+    app.state.pending = PendingStore()
     app.state.rate_limiter = RateLimiter.create(
         max_requests=settings.bot_rate_limit_max,
         window_sec=settings.bot_rate_limit_window_sec,
@@ -91,8 +117,10 @@ async def _startup() -> None:
 async def _shutdown() -> None:
     http: httpx.AsyncClient = app.state.http
     nux_http: httpx.AsyncClient = app.state.nux_http
+    genie_http: httpx.AsyncClient = app.state.genie_http
     await http.aclose()
     await nux_http.aclose()
+    await genie_http.aclose()
 
 
 @retry_telegram()
@@ -132,11 +160,16 @@ async def webhook(
         logger.warning("webhook rejected: invalid secret")
         raise HTTPException(status_code=401, detail="invalid secret")
 
-    ctx = BotContext(
-        nuxbill=app.state.nuxbill,
-        activate_using=settings.nuxbill_activate_using,
-        mikrotik=app.state.mikrotik,
-    )
+    def _ctx(chat_id: int, user_id: Optional[int]) -> BotContext:
+        return BotContext(
+            nuxbill=app.state.nuxbill,
+            activate_using=settings.nuxbill_activate_using,
+            mikrotik=app.state.mikrotik,
+            genieacs=app.state.genieacs,
+            pending=app.state.pending,
+            chat_id=chat_id,
+            user_id=user_id,
+        )
 
     if update.callback_query and isinstance(update.callback_query, dict):
         cb = update.callback_query
@@ -166,7 +199,7 @@ async def webhook(
 
         async def _process_cb() -> None:
             try:
-                result = await asyncio.wait_for(handle_callback(ctx, data), timeout=9.0)
+                result = await asyncio.wait_for(handle_callback(_ctx(chat_id, user_id if isinstance(user_id, int) else None), data), timeout=9.0)
                 ok = True
             except asyncio.TimeoutError:
                 result = CallbackResult("Timeout saat memproses. Coba lagi.", answer="Timeout")
@@ -198,19 +231,56 @@ async def webhook(
     if not msg or not msg.text:
         return {"ok": True}
 
-    parsed = parse_command(msg.text)
-    if not parsed:
-        return {"ok": True}
-
     user_id = msg.from_user.id if msg.from_user else None
     if not _is_allowed_user(settings, user_id):
         background.add_task(_send_telegram, msg.chat.id, msg.message_id, _DENY_TEXT, reply_markup=None)
         return {"ok": True}
+
     key = f"{msg.chat.id}:{user_id}"
     limiter: RateLimiter = app.state.rate_limiter
     if not limiter.allow(key):
         logger.info("rate_limited chat_id=%s user_id=%s", msg.chat.id, user_id)
         background.add_task(_send_telegram, msg.chat.id, msg.message_id, "Rate limit. Coba lagi sebentar.", reply_markup=None)
+        return {"ok": True}
+
+    pending: PendingStore = app.state.pending
+    pending_entry = pending.get_by_chat(key)
+    if pending_entry and not msg.text.strip().startswith("/"):
+        action_id, _ = pending_entry
+        start_ts = time.time()
+
+        async def _process_pending() -> None:
+            text = msg.text.strip()
+            try:
+                reply = await asyncio.wait_for(handle_command(_ctx(msg.chat.id, user_id), "pending_input", [action_id, text]), timeout=9.0)
+                ok = True
+            except asyncio.TimeoutError:
+                reply = BotReply("Timeout saat memproses. Coba lagi.")
+                ok = False
+            except Exception:
+                reply = BotReply("Terjadi kesalahan internal.")
+                ok = False
+
+            try:
+                await _send_telegram(msg.chat.id, msg.message_id, reply.text, reply_markup=reply.reply_markup)
+            finally:
+                audit: AuditStore = app.state.audit
+                ev = make_event(
+                    chat_id=msg.chat.id,
+                    user_id=user_id,
+                    command="pending_input",
+                    args="",
+                    ok=ok,
+                    message=reply.text[:4000],
+                    start_ts=start_ts,
+                )
+                await audit.write(ev)
+
+        background.add_task(_process_pending)
+        return {"ok": True}
+
+    parsed = parse_command(msg.text)
+    if not parsed:
         return {"ok": True}
 
     start_ts = time.time()
@@ -224,7 +294,7 @@ async def webhook(
             " ".join(parsed.args),
         )
         try:
-            reply = await asyncio.wait_for(handle_command(ctx, parsed.name, parsed.args), timeout=9.0)
+            reply = await asyncio.wait_for(handle_command(_ctx(msg.chat.id, user_id), parsed.name, parsed.args), timeout=9.0)
             ok = True
         except asyncio.TimeoutError:
             reply = BotReply("Timeout saat memproses perintah. Coba lagi.")
